@@ -1,0 +1,17 @@
+# Материалы курса (презентации преподавателя)
+UNIX_OS/presentations/
+
+# Результаты сборки lab1
+UNIX_OS/lab1/examples/hello
+UNIX_OS/lab1/examples/hello_cpp
+UNIX_OS/lab1/examples/broken
+UNIX_OS/lab1/examples/*.pdf
+*.o
+
+# Презентации по ОС
+OS/presentation-*.pdf
+
+
+# Результаты сборки лаб по ОС
+OS/lab1/monitor
+OS/lab2/server
