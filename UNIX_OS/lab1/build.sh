@@ -1,10 +1,11 @@
 #!/bin/sh
-# Сборка исходного файла (C или C++) во временном каталоге.
+# Сборка исходного файла (C, C++ или TeX) во временном каталоге.
 #
 # Имя конечного файла задаётся в тексте исходника комментарием с ключевым
 # словом «Output:», например:
 #     // Output: hello            (C/C++)
 #     /* Output: hello */         (C/C++)
+#     % Output: report.pdf        (TeX)
 #
 # Использование: build.sh ИСХОДНЫЙ_ФАЙЛ
 #
@@ -76,12 +77,14 @@ esac
 case $SRC_NAME in
     *.c)                             LANG_KIND=c ;;
     *.cpp | *.cc | *.cxx | *.C)      LANG_KIND=cxx ;;
-    *) die "$E_TYPE" "неподдерживаемый тип файла: $SRC_NAME (ожидается .c, .cpp, .cc или .cxx)" ;;
+    *.tex)                           LANG_KIND=tex ;;
+    *) die "$E_TYPE" "неподдерживаемый тип файла: $SRC_NAME (ожидается .c, .cpp, .cc, .cxx или .tex)" ;;
 esac
 
 case $LANG_KIND in
     c)   COMPILER=${CC:-cc} ;;
     cxx) COMPILER=${CXX:-c++} ;;
+    tex) COMPILER=${TEX:-pdflatex} ;;
 esac
 command -v "$COMPILER" >/dev/null 2>&1 || die "$E_NO_COMPILER" "компилятор не найден: $COMPILER"
 
@@ -94,6 +97,20 @@ case $LANG_KIND in
     c | cxx)
         "$COMPILER" -Wall -Wextra -O2 -o "$WORKDIR/result" "$SRC_ABS" \
             || die "$E_COMPILE" "ошибка компиляции $SRC"
+        ;;
+    tex)
+        # Каталог исходника добавляется в TEXINPUTS, чтобы работали \input и
+        # \includegraphics с относительными путями. Два прохода — для ссылок
+        # и оглавления.
+        TEXINPUTS=$SRC_DIR:${TEXINPUTS:-}
+        export TEXINPUTS
+        for pass in 1 2; do
+            "$COMPILER" -interaction=nonstopmode -halt-on-error \
+                -jobname=result -output-directory="$WORKDIR" "$SRC_ABS" >/dev/null \
+                || die "$E_COMPILE" "ошибка компиляции $SRC (проход $pass), см. журнал TeX"
+        done
+        mv -- "$WORKDIR/result.pdf" "$WORKDIR/result" \
+            || die "$E_COMPILE" "TeX не создал PDF-файл"
         ;;
 esac
 
