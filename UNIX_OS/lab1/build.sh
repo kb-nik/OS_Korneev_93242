@@ -33,6 +33,7 @@ E_TMPDIR=7
 E_COPY=8
 
 WORKDIR=
+CHILD=
 
 die() {
     code=$1
@@ -42,6 +43,12 @@ die() {
 }
 
 cleanup() {
+    # Если сборка ещё идёт (нас прервали сигналом) — останавливаем компилятор.
+    if [ -n "$CHILD" ]; then
+        kill "$CHILD" 2>/dev/null
+        wait "$CHILD" 2>/dev/null
+        CHILD=
+    fi
     if [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
         rm -rf -- "$WORKDIR"
     fi
@@ -55,6 +62,18 @@ trap 'exit 130' INT
 trap 'exit 131' QUIT
 trap 'exit 141' PIPE
 trap 'exit 143' TERM
+
+# Запуск шага сборки в фоне с ожиданием через wait: в отличие от обычного
+# запуска, wait прерывается пришедшим сигналом, и скрипт реагирует сразу,
+# не дожидаясь окончания работы компилятора.
+run() {
+    "$@" &
+    CHILD=$!
+    wait "$CHILD"
+    rc=$?
+    CHILD=
+    return "$rc"
+}
 
 [ $# -eq 1 ] || die "$E_USAGE" "использование: $PROG ИСХОДНЫЙ_ФАЙЛ"
 
@@ -95,7 +114,7 @@ cd -- "$WORKDIR" || die "$E_TMPDIR" "не удалось перейти во в�
 
 case $LANG_KIND in
     c | cxx)
-        "$COMPILER" -Wall -Wextra -O2 -o "$WORKDIR/result" "$SRC_ABS" \
+        run "$COMPILER" -Wall -Wextra -O2 -o "$WORKDIR/result" "$SRC_ABS" \
             || die "$E_COMPILE" "ошибка компиляции $SRC"
         ;;
     tex)
@@ -105,7 +124,7 @@ case $LANG_KIND in
         TEXINPUTS=$SRC_DIR:${TEXINPUTS:-}
         export TEXINPUTS
         for pass in 1 2; do
-            "$COMPILER" -interaction=nonstopmode -halt-on-error \
+            run "$COMPILER" -interaction=nonstopmode -halt-on-error \
                 -jobname=result -output-directory="$WORKDIR" "$SRC_ABS" >/dev/null \
                 || die "$E_COMPILE" "ошибка компиляции $SRC (проход $pass), см. журнал TeX"
         done
