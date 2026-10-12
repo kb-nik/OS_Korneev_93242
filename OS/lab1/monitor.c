@@ -26,6 +26,7 @@ struct monitor {
     pthread_cond_t ready_cond;  /* событие появилось — для потребителя */
     pthread_cond_t free_cond;   /* событие обработано — для поставщика */
     int ready;                  /* предикат: в мониторе есть необработанное событие */
+    int stopping;               /* поставщик закончил работу */
     struct event *data;
 };
 
@@ -34,8 +35,17 @@ static struct monitor mon = {
     PTHREAD_COND_INITIALIZER,
     PTHREAD_COND_INITIALIZER,
     0,
+    0,
     NULL
 };
+
+static void check(int rc, const char *what)
+{
+    if (rc != 0) {
+        fprintf(stderr, "%s: %s\n", what, strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+}
 
 /*
  * Передать событие в монитор. Если предыдущее событие ещё не обработано,
@@ -44,46 +54,58 @@ static struct monitor mon = {
  */
 static void provide(struct event *ev)
 {
-    pthread_mutex_lock(&mon.mutex);
+    check(pthread_mutex_lock(&mon.mutex), "pthread_mutex_lock");
     while (mon.ready)
-        pthread_cond_wait(&mon.free_cond, &mon.mutex);
+        check(pthread_cond_wait(&mon.free_cond, &mon.mutex), "pthread_cond_wait");
     mon.data = ev;
     mon.ready = 1;
     /* Сообщение печатается под мьютексом, поэтому порядок сообщений
      * совпадает с порядком переходов состояния монитора. */
     printf("поставщик: отправлено событие %d\n", ev->id);
     fflush(stdout);
-    pthread_cond_signal(&mon.ready_cond);
-    pthread_mutex_unlock(&mon.mutex);
+    check(pthread_cond_signal(&mon.ready_cond), "pthread_cond_signal");
+    check(pthread_mutex_unlock(&mon.mutex), "pthread_mutex_unlock");
+}
+
+/* Сообщить потребителю, что событий больше не будет. */
+static void stop(void)
+{
+    check(pthread_mutex_lock(&mon.mutex), "pthread_mutex_lock");
+    mon.stopping = 1;
+    check(pthread_cond_broadcast(&mon.ready_cond), "pthread_cond_broadcast");
+    check(pthread_mutex_unlock(&mon.mutex), "pthread_mutex_unlock");
 }
 
 /*
  * Получить событие. Условие проверяется в цикле: пробуждение может быть
  * ложным, а уведомление могло прийти раньше, чем поток начал ждать.
+ * Возвращает NULL, когда поставщик завершил работу и событий не осталось.
  */
 static struct event *consume(void)
 {
-    struct event *ev;
+    struct event *ev = NULL;
 
-    pthread_mutex_lock(&mon.mutex);
-    while (!mon.ready)
-        pthread_cond_wait(&mon.ready_cond, &mon.mutex);
-    ev = mon.data;
-    mon.data = NULL;
-    mon.ready = 0;
-    printf("потребитель: получено событие %d (%s)\n", ev->id, ev->text);
-    fflush(stdout);
-    pthread_cond_signal(&mon.free_cond);
-    pthread_mutex_unlock(&mon.mutex);
+    check(pthread_mutex_lock(&mon.mutex), "pthread_mutex_lock");
+    while (!mon.ready && !mon.stopping)
+        check(pthread_cond_wait(&mon.ready_cond, &mon.mutex), "pthread_cond_wait");
+    if (mon.ready) {
+        ev = mon.data;
+        mon.data = NULL;
+        mon.ready = 0;
+        printf("потребитель: получено событие %d (%s)\n", ev->id, ev->text);
+        fflush(stdout);
+        check(pthread_cond_signal(&mon.free_cond), "pthread_cond_signal");
+    }
+    check(pthread_mutex_unlock(&mon.mutex), "pthread_mutex_unlock");
     return ev;
 }
 
 static void *producer(void *arg)
 {
+    int count = *(int *)arg;
     int id;
 
-    (void)arg;
-    for (id = 1;; id++) {
+    for (id = 1; count == 0 || id <= count; id++) {
         struct event *ev;
         char text[64];
 
@@ -97,15 +119,16 @@ static void *producer(void *arg)
         ev->id = id;
         provide(ev);
     }
+    stop();
     return NULL;
 }
 
 static void *consumer(void *arg)
 {
-    (void)arg;
-    for (;;) {
-        struct event *ev = consume();
+    struct event *ev;
 
+    (void)arg;
+    while ((ev = consume()) != NULL) {
         /* Обработка вне мьютекса: поставщик в это время может готовить
          * следующее событие. Владение событием перешло к потребителю. */
         free(ev->text);
@@ -117,10 +140,16 @@ static void *consumer(void *arg)
 int main(void)
 {
     pthread_t prod, cons;
+    int count = 10;
 
-    pthread_create(&cons, NULL, consumer, NULL);
-    pthread_create(&prod, NULL, producer, NULL);
-    pthread_join(prod, NULL);
-    pthread_join(cons, NULL);
+    check(pthread_create(&cons, NULL, consumer, NULL), "pthread_create");
+    check(pthread_create(&prod, NULL, producer, &count), "pthread_create");
+    check(pthread_join(prod, NULL), "pthread_join");
+    check(pthread_join(cons, NULL), "pthread_join");
+
+    /* Оба потока завершены — монитор больше никто не использует. */
+    check(pthread_cond_destroy(&mon.ready_cond), "pthread_cond_destroy");
+    check(pthread_cond_destroy(&mon.free_cond), "pthread_cond_destroy");
+    check(pthread_mutex_destroy(&mon.mutex), "pthread_mutex_destroy");
     return EXIT_SUCCESS;
 }
