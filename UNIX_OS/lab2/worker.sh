@@ -11,12 +11,18 @@
 
 DIR=${SHARED_DIR:-/shared}
 LOCK=$DIR/.lock          # служебный файл синхронизации
+ERRORS=$DIR/.errors      # журнал обнаруженных нарушений (для проверки)
 
 # Случайный идентификатор контейнера: 16 шестнадцатеричных символов.
 ID=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
 CURRENT=
 log() { printf '[%s] %s\n' "$ID" "$*"; }
+
+report() {
+    log "ОШИБКА: $*" >&2
+    printf '%s %s\n' "$ID" "$*" >> "$ERRORS"
+}
 
 # Контейнер останавливается сигналом TERM (docker stop). Процесс с PID 1
 # игнорирует сигналы без обработчика, поэтому обработчик обязателен.
@@ -40,6 +46,11 @@ mkdir -p -- "$DIR" || exit 1
 # снимается вызовами flock, без порождения подоболочек на каждый шаг.
 exec 9>>"$LOCK" || exit 1
 
+# noclobber: перенаправление > завершится ошибкой, если файл уже существует
+# (O_EXCL). Это дополнительная страховка: при корректной блокировке
+# такого произойти не должно, а если произойдёт — это будет зафиксировано.
+set -C
+
 log "запущен, каталог $DIR"
 n=0
 while :; do
@@ -47,22 +58,35 @@ while :; do
     content="$ID $n"
 
     # ---- атомарный участок: поиск имени и создание файла ----
-    flock -x 9 || exit 1
+    flock -x 9 || { report "не удалось захватить блокировку"; exit 1; }
     i=1
     while :; do
         name=$(printf '%03d' "$i")
         [ -e "$DIR/$name" ] || break
         i=$((i + 1))
     done
-    printf '%s\n' "$content" > "$DIR/$name"
+    if printf '%s\n' "$content" > "$DIR/$name"; then
+        created=1
+    else
+        created=
+    fi
     flock -u 9
     # ---- конец атомарного участка ----
 
+    if [ -z "$created" ]; then
+        report "не удалось создать $name (файл уже существует?)"
+        pause
+        continue
+    fi
     CURRENT=$name
     log "создан $name: $content"
 
     pause
 
+    # Перед удалением проверяем, что в файле по-прежнему наши данные.
+    # Расхождение означало бы гонку (кто-то перезаписал наш файл).
+    actual=$(cat -- "$DIR/$name" 2>/dev/null)
+    [ "$actual" = "$content" ] || report "$name: ожидалось '$content', найдено '$actual'"
     rm -f -- "$DIR/$name"
     CURRENT=
     log "удалён $name"
