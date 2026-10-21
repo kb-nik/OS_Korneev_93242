@@ -6,6 +6,8 @@
  * Событие передаётся по указателю (struct event выделяется в куче
  * поставщиком и освобождается потребителем), т. е. данные не копируются
  * и не сериализуются.
+ *
+ * Использование: ./monitor [число_событий]   (0 — бесконечно, по умолчанию 10)
  */
 
 #include <pthread.h>
@@ -137,10 +139,24 @@ static void *consumer(void *arg)
     return NULL;
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
     pthread_t prod, cons;
     int count = 10;
+
+    if (argc > 2) {
+        fprintf(stderr, "использование: %s [число_событий]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (argc == 2) {
+        char *end;
+        long n = strtol(argv[1], &end, 10);
+        if (*argv[1] == '\0' || *end != '\0' || n < 0 || n > 1000000) {
+            fprintf(stderr, "некорректное число событий: %s\n", argv[1]);
+            return EXIT_FAILURE;
+        }
+        count = (int)n;
+    }
 
     check(pthread_create(&cons, NULL, consumer, NULL), "pthread_create");
     check(pthread_create(&prod, NULL, producer, &count), "pthread_create");
