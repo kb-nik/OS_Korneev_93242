@@ -110,7 +110,11 @@ command -v "$COMPILER" >/dev/null 2>&1 || die "$E_NO_COMPILER" "компилят
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/build.XXXXXX") || die "$E_TMPDIR" "не удалось создать временный каталог"
 
 # Все промежуточные файлы (объектные, .aux, .log и т. п.) создаются в WORKDIR.
+# TMPDIR указывает туда же: gcc складывает свои временные .s и .o именно в
+# $TMPDIR, и иначе они попали бы в /tmp.
 cd -- "$WORKDIR" || die "$E_TMPDIR" "не удалось перейти во временный каталог"
+TMPDIR=$WORKDIR
+export TMPDIR
 
 case $LANG_KIND in
     c | cxx)
@@ -123,10 +127,14 @@ case $LANG_KIND in
         # и оглавления.
         TEXINPUTS=$SRC_DIR:${TEXINPUTS:-}
         export TEXINPUTS
+        # Вывод TeX подробный, поэтому скрыт; при ошибке показываем из журнала
+        # строки, начинающиеся с «!», — журнал удалится вместе с WORKDIR.
         for pass in 1 2; do
-            run "$COMPILER" -interaction=nonstopmode -halt-on-error \
-                -jobname=result -output-directory="$WORKDIR" "$SRC_ABS" >/dev/null \
-                || die "$E_COMPILE" "ошибка компиляции $SRC (проход $pass), см. журнал TeX"
+            if ! run "$COMPILER" -interaction=nonstopmode -halt-on-error \
+                -jobname=result -output-directory="$WORKDIR" "$SRC_ABS" >/dev/null; then
+                [ -f "$WORKDIR/result.log" ] && grep -A 2 '^!' "$WORKDIR/result.log" >&2
+                die "$E_COMPILE" "ошибка компиляции $SRC (проход $pass)"
+            fi
         done
         mv -- "$WORKDIR/result.pdf" "$WORKDIR/result" \
             || die "$E_COMPILE" "TeX не создал PDF-файл"
