@@ -2,10 +2,10 @@
 UNIX_OS/presentations/
 
 # Результаты сборки lab1
-UNIX_OS/lab1/examples/hello
-UNIX_OS/lab1/examples/hello_cpp
-UNIX_OS/lab1/examples/broken
-UNIX_OS/lab1/examples/*.pdf
+UNIX_OS/lab_1_Korneev_932423/examples/hello
+UNIX_OS/lab_1_Korneev_932423/examples/hello_cpp
+UNIX_OS/lab_1_Korneev_932423/examples/broken
+UNIX_OS/lab_1_Korneev_932423/examples/*.pdf
 *.o
 
 # Презентации по ОС
@@ -13,5 +13,5 @@ OS/presentation-*.pdf
 
 
 # Результаты сборки лаб по ОС
-OS/lab1/monitor
-OS/lab2/server
+OS/lab_1_Korneev_932423/monitor
+OS/lab_2_Korneev_932423/server
