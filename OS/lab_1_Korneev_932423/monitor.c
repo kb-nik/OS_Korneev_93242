@@ -1,43 +1,24 @@
-/*
- * Монитор с двумя потоками: поставщиком и потребителем.
- *
- * Поставщик раз в секунду создаёт событие и передаёт его в монитор,
- * потребитель ждёт событие на условной переменной и обрабатывает его.
- * Событие передаётся по указателю (struct event выделяется в куче
- * поставщиком и освобождается потребителем), т. е. данные не копируются
- * и не сериализуются.
- *
- * Использование: ./monitor [число_событий]   (0 — бесконечно, по умолчанию 10)
- */
-
+#include <limits.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-/* Условное событие: несериализуемые данные, передаются по указателю. */
-struct event {
-    int id;
-    char *text;
-};
-
-/* Монитор: разделяемое состояние, блокировка и ожидание уведомления. */
 struct monitor {
     pthread_mutex_t mutex;
-    pthread_cond_t ready_cond;  /* событие появилось — для потребителя */
-    pthread_cond_t free_cond;   /* событие обработано — для поставщика */
-    int ready;                  /* предикат: в мониторе есть необработанное событие */
-    int stopping;               /* поставщик закончил работу */
-    struct event *data;
+    pthread_cond_t condition;
+    bool ready;
+    bool stopping;
+    int *data;
 };
 
 static struct monitor mon = {
     PTHREAD_MUTEX_INITIALIZER,
     PTHREAD_COND_INITIALIZER,
-    PTHREAD_COND_INITIALIZER,
-    0,
-    0,
+    false,
+    false,
     NULL
 };
 
@@ -49,92 +30,85 @@ static void check(int rc, const char *what)
     }
 }
 
-/*
- * Передать событие в монитор. Если предыдущее событие ещё не обработано,
- * поставщик ждёт на free_cond, а не опрашивает ready в цикле — так он тоже
- * не тратит процессорное время.
- */
-static void provide(struct event *ev)
+static void provide(struct monitor *monitor, int value)
 {
-    check(pthread_mutex_lock(&mon.mutex), "pthread_mutex_lock");
-    while (mon.ready)
-        check(pthread_cond_wait(&mon.free_cond, &mon.mutex), "pthread_cond_wait");
-    mon.data = ev;
-    mon.ready = 1;
-    /* Сообщение печатается под мьютексом, поэтому порядок сообщений
-     * совпадает с порядком переходов состояния монитора. */
-    printf("поставщик: отправлено событие %d\n", ev->id);
-    fflush(stdout);
-    check(pthread_cond_signal(&mon.ready_cond), "pthread_cond_signal");
-    check(pthread_mutex_unlock(&mon.mutex), "pthread_mutex_unlock");
-}
+    int *event;
 
-/* Сообщить потребителю, что событий больше не будет. */
-static void stop(void)
-{
-    check(pthread_mutex_lock(&mon.mutex), "pthread_mutex_lock");
-    mon.stopping = 1;
-    check(pthread_cond_broadcast(&mon.ready_cond), "pthread_cond_broadcast");
-    check(pthread_mutex_unlock(&mon.mutex), "pthread_mutex_unlock");
-}
-
-/*
- * Получить событие. Условие проверяется в цикле: пробуждение может быть
- * ложным, а уведомление могло прийти раньше, чем поток начал ждать.
- * Возвращает NULL, когда поставщик завершил работу и событий не осталось.
- */
-static struct event *consume(void)
-{
-    struct event *ev = NULL;
-
-    check(pthread_mutex_lock(&mon.mutex), "pthread_mutex_lock");
-    while (!mon.ready && !mon.stopping)
-        check(pthread_cond_wait(&mon.ready_cond, &mon.mutex), "pthread_cond_wait");
-    if (mon.ready) {
-        ev = mon.data;
-        mon.data = NULL;
-        mon.ready = 0;
-        printf("потребитель: получено событие %d (%s)\n", ev->id, ev->text);
-        fflush(stdout);
-        check(pthread_cond_signal(&mon.free_cond), "pthread_cond_signal");
+    check(pthread_mutex_lock(&monitor->mutex), "pthread_mutex_lock");
+    while (monitor->ready) {
+        check(pthread_mutex_unlock(&monitor->mutex), "pthread_mutex_unlock");
+        sleep(1);
+        check(pthread_mutex_lock(&monitor->mutex), "pthread_mutex_lock");
     }
-    check(pthread_mutex_unlock(&mon.mutex), "pthread_mutex_unlock");
-    return ev;
+
+    event = malloc(sizeof(*event));
+    if (event == NULL) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+    *event = value;
+    monitor->data = event;
+    monitor->ready = true;
+    printf("поставщик: отправлено событие %d\n", value);
+    fflush(stdout);
+    check(pthread_cond_signal(&monitor->condition), "pthread_cond_signal");
+    check(pthread_mutex_unlock(&monitor->mutex), "pthread_mutex_unlock");
+}
+
+static bool consume(struct monitor *monitor)
+{
+    int *event;
+
+    check(pthread_mutex_lock(&monitor->mutex), "pthread_mutex_lock");
+    while (!monitor->ready && !monitor->stopping)
+        check(pthread_cond_wait(&monitor->condition, &monitor->mutex),
+              "pthread_cond_wait");
+
+    if (monitor->stopping) {
+        check(pthread_mutex_unlock(&monitor->mutex), "pthread_mutex_unlock");
+        return false;
+    }
+
+    event = monitor->data;
+    monitor->data = NULL;
+    monitor->ready = false;
+    printf("потребитель: получено событие %d\n", *event);
+    fflush(stdout);
+    free(event);
+    check(pthread_cond_signal(&monitor->condition), "pthread_cond_signal");
+    check(pthread_mutex_unlock(&monitor->mutex), "pthread_mutex_unlock");
+    return true;
+}
+
+static void finish(struct monitor *monitor)
+{
+    check(pthread_mutex_lock(&monitor->mutex), "pthread_mutex_lock");
+    while (monitor->ready)
+        check(pthread_cond_wait(&monitor->condition, &monitor->mutex),
+              "pthread_cond_wait");
+    monitor->stopping = true;
+    check(pthread_cond_broadcast(&monitor->condition), "pthread_cond_broadcast");
+    check(pthread_mutex_unlock(&monitor->mutex), "pthread_mutex_unlock");
 }
 
 static void *producer(void *arg)
 {
     int count = *(int *)arg;
-    int id;
+    int id = 1;
 
-    for (id = 1; count == 0 || id <= count; id++) {
-        struct event *ev;
-        char text[64];
-
+    while (count == 0 || id <= count) {
         sleep(1);
-        ev = malloc(sizeof(*ev));
-        snprintf(text, sizeof(text), "данные события №%d", id);
-        if (ev == NULL || (ev->text = strdup(text)) == NULL) {
-            perror("malloc");
-            exit(EXIT_FAILURE);
-        }
-        ev->id = id;
-        provide(ev);
+        provide(&mon, id * 10);
+        id = id == INT_MAX / 10 ? 1 : id + 1;
     }
-    stop();
+    finish(&mon);
     return NULL;
 }
 
 static void *consumer(void *arg)
 {
-    struct event *ev;
-
     (void)arg;
-    while ((ev = consume()) != NULL) {
-        /* Обработка вне мьютекса: поставщик в это время может готовить
-         * следующее событие. Владение событием перешло к потребителю. */
-        free(ev->text);
-        free(ev);
+    while (consume(&mon)) {
     }
     return NULL;
 }
@@ -142,7 +116,7 @@ static void *consumer(void *arg)
 int main(int argc, char *argv[])
 {
     pthread_t prod, cons;
-    int count = 10;
+    int count = 5;
 
     if (argc > 2) {
         fprintf(stderr, "использование: %s [число_событий]\n", argv[0]);
@@ -163,9 +137,7 @@ int main(int argc, char *argv[])
     check(pthread_join(prod, NULL), "pthread_join");
     check(pthread_join(cons, NULL), "pthread_join");
 
-    /* Оба потока завершены — монитор больше никто не использует. */
-    check(pthread_cond_destroy(&mon.ready_cond), "pthread_cond_destroy");
-    check(pthread_cond_destroy(&mon.free_cond), "pthread_cond_destroy");
+    check(pthread_cond_destroy(&mon.condition), "pthread_cond_destroy");
     check(pthread_mutex_destroy(&mon.mutex), "pthread_mutex_destroy");
     return EXIT_SUCCESS;
 }

@@ -7,9 +7,8 @@
 ## Сборка и запуск
 
 ```sh
-make
-./monitor        # 10 событий
+gcc -Wall -Wextra -pedantic -O2 -pthread monitor.c -o monitor
+./monitor        # 5 событий
 ./monitor 3      # 3 события
 ./monitor 0      # бесконечно, остановка — Ctrl+C
-make clean
 ```
